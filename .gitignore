@@ -193,6 +193,8 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
+models/*.pth
 
-models/
 datasets/
+
+violation_captures/

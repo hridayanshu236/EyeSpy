@@ -1,13 +1,23 @@
 import os
+import glob
 import cv2
 import torch
-import torchvision.transforms as transforms
 import time
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel
+from PyQt5.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QPushButton
+)
 from PyQt5.QtCore import Qt, QTimer, QDateTime
 from PyQt5.QtGui import QPixmap, QColor, QPainter, QImage
+import torchvision.transforms as transforms
 
-def draw_boxes(image, boxes, labels, color=(0, 0, 255), label_prefix="Cheating: "):
+from models import (
+    ObjectDetectionCNN,
+    ObjectDetectionResNet,
+    ObjectDetectionDenseNet121,
+    ObjectDetectionMobileNetV2
+)
+
+def draw_boxes(image, boxes, labels, color=(0, 0, 255), label_prefix=""):
     image = image.copy()
     h, w = image.shape[:2]
     for box, label in zip(boxes, labels):
@@ -18,52 +28,15 @@ def draw_boxes(image, boxes, labels, color=(0, 0, 255), label_prefix="Cheating: 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
     return image
 
-class ObjectDetectionCNN(torch.nn.Module):
-    def __init__(self, input_channels=3, num_predictions=2):
-        super().__init__()
-        def conv_block(in_channels, out_channels, num_convs, pool=True):
-            layers = []
-            for _ in range(num_convs):
-                layers.append(torch.nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1))
-                layers.append(torch.nn.ReLU(inplace=True))
-                in_channels = out_channels
-            if pool:
-                layers.append(torch.nn.MaxPool2d(kernel_size=2, stride=2))
-            return torch.nn.Sequential(*layers)
-        self.features = torch.nn.Sequential(
-            conv_block(input_channels, 64, num_convs=2),
-            conv_block(64, 128, num_convs=2),
-            conv_block(128, 256, num_convs=4),
-            conv_block(256, 512, num_convs=4),
-            conv_block(512, 512, num_convs=4),
-        )
-        self.adapt_pool = torch.nn.AdaptiveAvgPool2d((7, 7))
-        self.classifier = torch.nn.Sequential(
-            torch.nn.Flatten(),
-            torch.nn.Linear(512 * 7 * 7, 4096),
-            torch.nn.ReLU(inplace=True),
-            torch.nn.Linear(4096, 4096),
-            torch.nn.ReLU(inplace=True),
-            torch.nn.Linear(4096, num_predictions * 5)
-        )
-        self.num_predictions = num_predictions
-
-    def forward(self, x):
-        x = self.features(x)
-        x = self.adapt_pool(x)
-        x = self.classifier(x)
-        x = x.view(x.shape[0], self.num_predictions, 5)
-        return x
-
 class CameraWidget(QWidget):
-    def __init__(self, camera_name, parent=None):
+    def __init__(self, camera_name, model_type="cnn", parent=None):
         super().__init__(parent)
         self.camera_name = camera_name
         self.camera = None
         self.camera_id = 0
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_frame)
-        self.setup_detection_model()
+        self.model_type = model_type  # "cnn", "resnet", "densenet", "mobilenet"
         self.violation_count = 0
         self.last_violation_time = 0
         self.violation_cooldown = 3000
@@ -71,41 +44,35 @@ class CameraWidget(QWidget):
         self.max_log_entries = 100
         self.save_dir = "violation_captures"
         os.makedirs(self.save_dir, exist_ok=True)
-        self.setup_ui()
+        self.confidence_threshold = 0.5
 
-    def setup_detection_model(self):
-        try:
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            print(f"Using device: {self.device}")
-            self.model = ObjectDetectionCNN(input_channels=3, num_predictions=2).to(self.device)
-            model_path = "models/object_detection_model_20250612_152341.pth"
-            if not os.path.exists(model_path):
-                print(f"Model file not found: {model_path}")
-                self.model_loaded = False
-                return
-            checkpoint = torch.load(model_path, map_location=self.device)
-            if 'model_state_dict' in checkpoint:
-                self.model.load_state_dict(checkpoint['model_state_dict'])
-            else:
-                self.model.load_state_dict(checkpoint)
-            self.model.eval()
-            self.transform = transforms.Compose([
-                transforms.ToPILImage(),
-                transforms.Resize((320, 320)),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-            ])
-            self.confidence_threshold = 0.2
-            self.model_loaded = True
-            print("Cheating detection model initialized successfully")
-        except Exception as e:
-            self.model_loaded = False
-            print(f"Error loading detection model: {str(e)}")
+        self.frame_skip = 2
+        self._frame_counter = 0
+        cv2.setNumThreads(1)
+        torch.set_num_threads(1)
+
+        self.setup_ui()
+        self.setup_detection_model()
 
     def setup_ui(self):
         self.setMinimumHeight(480)
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(0, 0, 0, 0)
+
+        top_bar = QWidget()
+        top_layout = QHBoxLayout(top_bar)
+        top_layout.setContentsMargins(5, 5, 5, 5)
+        self.model_selector = QComboBox()
+        self.model_selector.addItems(["cnn", "resnet", "densenet", "mobilenet"])
+        self.model_selector.setCurrentText(self.model_type)
+        self.model_selector.currentTextChanged.connect(self.on_model_type_changed)
+        top_layout.addWidget(QLabel("Model:"))
+        top_layout.addWidget(self.model_selector)
+        self.reload_btn = QPushButton("Reload Model")
+        self.reload_btn.clicked.connect(self.setup_detection_model)
+        top_layout.addWidget(self.reload_btn)
+        self.main_layout.addWidget(top_bar)
+
         self.camera_feed = QLabel()
         self.camera_feed.setAlignment(Qt.AlignCenter)
         self.camera_feed.setStyleSheet("background-color: #191919; border-radius: 4px;")
@@ -139,6 +106,78 @@ class CameraWidget(QWidget):
             }
         """)
 
+    def on_model_type_changed(self, new_type):
+        self.model_type = new_type
+        self.setup_detection_model()
+
+    def setup_detection_model(self):
+        try:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            print(f"Using device: {self.device}")
+            if self.model_type == "cnn":
+                self.model = ObjectDetectionCNN(input_channels=3, num_predictions=2).to(self.device)
+                model_path = "models/CNN37.pth"
+            elif self.model_type == "resnet":
+                self.model = ObjectDetectionResNet(num_predictions=2).to(self.device)
+                resnet_files = glob.glob("models/ResNet*.pth")
+                if resnet_files:
+                    model_path = resnet_files[0]
+                else:
+                    print("No ResNet model file found in models/.")
+                    self.model_loaded = False
+                    self.status_indicator.setText("Status: No ResNet model file found")
+                    return
+            elif self.model_type == "densenet":
+                self.model = ObjectDetectionDenseNet121(num_predictions=2).to(self.device)
+                densenet_files = glob.glob("models/DenseNet*.pth")
+                if densenet_files:
+                    model_path = densenet_files[0]
+                else:
+                    print("No DenseNet model file found in models/.")
+                    self.model_loaded = False
+                    self.status_indicator.setText("Status: No DenseNet model file found")
+                    return
+            elif self.model_type == "mobilenet":
+                self.model = ObjectDetectionMobileNetV2(num_predictions=2).to(self.device)
+                mobilenet_files = glob.glob("models/MobileNet*.pth")
+                if mobilenet_files:
+                    model_path = mobilenet_files[0]
+                else:
+                    print("No MobileNet model file found in models/.")
+                    self.model_loaded = False
+                    self.status_indicator.setText("Status: No MobileNet model file found")
+                    return
+            else:
+                print(f"Unknown model type: {self.model_type}")
+                self.model_loaded = False
+                self.status_indicator.setText("Status: Unknown model type")
+                return
+
+            if not os.path.exists(model_path):
+                print(f"Model file not found: {model_path}")
+                self.model_loaded = False
+                self.status_indicator.setText("Status: Model file not found")
+                return
+            checkpoint = torch.load(model_path, map_location=self.device)
+            if 'model_state_dict' in checkpoint:
+                self.model.load_state_dict(checkpoint['model_state_dict'])
+            else:
+                self.model.load_state_dict(checkpoint)
+            self.model.eval()
+            self.transform = transforms.Compose([
+                transforms.ToPILImage(),
+                transforms.Resize((320, 320)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
+            self.model_loaded = True
+            self.status_indicator.setText(f"Status: Model '{self.model_type}' loaded")
+            print(f"{self.model_type} model initialized successfully")
+        except Exception as e:
+            self.model_loaded = False
+            self.status_indicator.setText(f"Status: Model Load Error")
+            print(f"Error loading detection model: {str(e)}")
+
     def start_camera(self):
         try:
             self.camera = cv2.VideoCapture(self.camera_id)
@@ -164,31 +203,36 @@ class CameraWidget(QWidget):
         ))
 
     def detect_cheating(self, frame):
+        """
+        Detects cheating in a frame using the object detection model.
+        Uses only the first box's objectness as in your evaluation.
+        1 = not cheating, 0 = cheating.
+        Returns: (output_frame, is_cheating, pred_objectness)
+        Only draws box and writes "Cheat" if cheating is detected.
+        """
         if not getattr(self, 'model_loaded', False):
             return frame, False, 0.0
         try:
             input_tensor = self.transform(frame)
             input_tensor = input_tensor.unsqueeze(0).to(self.device)
-            with torch.no_grad():
-                outputs = self.model(input_tensor)[0]
+            with torch.inference_mode():
+                outputs = self.model(input_tensor)[0]  # Shape: [2, 5]
+            pred_objectness = torch.sigmoid(outputs[0, 0]).item()
+            pred_class = 1 if pred_objectness > self.confidence_threshold else 0
+            is_cheating = (pred_class == 0)
+
             drawn_boxes = []
             box_labels = []
-            any_cheating = False
-            for pred in outputs:
-                score = torch.sigmoid(pred[0]).item()
-                x_min = int(round(pred[1].item()))
-                y_min = int(round(pred[2].item()))
-                x_max = int(round(pred[3].item()))
-                y_max = int(round(pred[4].item()))
-                print(f"Model score: {score:.4f} | Box: ({x_min}, {y_min}, {x_max}, {y_max})")
-                if score < self.confidence_threshold:
-                    # Flag cheating even if box is tiny
-                    drawn_boxes.append([x_min, y_min, x_max, y_max])
-                    box_labels.append(f"{score:.2f}")
-                    any_cheating = True
+            if is_cheating:
+                x_min = int(round(outputs[0, 1].item()))
+                y_min = int(round(outputs[0, 2].item()))
+                x_max = int(round(outputs[0, 3].item()))
+                y_max = int(round(outputs[0, 4].item()))
+                drawn_boxes.append([x_min, y_min, x_max, y_max])
+                box_labels.append("Cheat")
+
             output_frame = draw_boxes(frame, drawn_boxes, box_labels)
-            min_score = min([torch.sigmoid(pred[0]).item() for pred in outputs], default=1.0)
-            return output_frame, any_cheating, min_score
+            return output_frame, is_cheating, pred_objectness
         except Exception as e:
             print(f"Error in cheating detection: {str(e)}")
             import traceback
@@ -222,6 +266,10 @@ class CameraWidget(QWidget):
     def update_frame(self):
         try:
             if self.camera and self.camera.isOpened():
+                self._frame_counter = (self._frame_counter + 1) % self.frame_skip
+                if self._frame_counter != 0:
+                    return
+
                 ret, frame = self.camera.read()
                 if not ret or frame is None:
                     print("Frame read failed or returned None.")
@@ -230,7 +278,10 @@ class CameraWidget(QWidget):
                     ))
                     return
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                processed_frame, is_cheating, score = self.detect_cheating(frame_rgb)
+                frame_resized = cv2.resize(frame_rgb, (320, 320))
+                processed_frame, is_cheating, score = self.detect_cheating(frame_resized)
+                processed_frame = cv2.resize(processed_frame, (frame.shape[1], frame.shape[0]))
+
                 current_time = time.time() * 1000
                 if is_cheating and (current_time - self.last_violation_time > self.violation_cooldown):
                     self.show_violation()
@@ -242,8 +293,8 @@ class CameraWidget(QWidget):
                     img = QImage(processed_frame.data, w, h, ch * w, QImage.Format_RGB888)
                     pixmap = QPixmap.fromImage(img)
                     self.camera_feed.setPixmap(pixmap.scaled(
-                        self.camera_feed.width(), 
-                        self.camera_feed.height(), 
+                        self.camera_feed.width(),
+                        self.camera_feed.height(),
                         Qt.KeepAspectRatio
                     ))
                 except Exception as e:
