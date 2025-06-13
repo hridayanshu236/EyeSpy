@@ -20,6 +20,10 @@ if __name__ == "__main__":
     start_button.clicked.connect(camera.start_camera)
     stop_button.clicked.connect(camera.stop_camera)
 
+    # Connect camera widget to logs and statistics panels
+    main_window.logs_panel.set_camera_widget(camera)
+    main_window.statistics_panel.set_camera_widget(camera)
+
     # Setup timer to update date/time label
     def update_datetime():
         current_datetime = QDateTime.currentDateTime()

@@ -52,15 +52,23 @@ class MainWindow(QMainWindow):
         
         # Connect sidebar signals
         self.sidebar.cameras_btn.clicked.connect(lambda: self.stacked_widget.setCurrentIndex(0))
-        self.sidebar.logs_btn.clicked.connect(lambda: self.stacked_widget.setCurrentIndex(1))
+        self.sidebar.logs_btn.clicked.connect(self.show_logs_panel)
         self.sidebar.stats_btn.clicked.connect(lambda: self.stacked_widget.setCurrentIndex(2))
         self.sidebar.settings_btn.clicked.connect(lambda: self.stacked_widget.setCurrentIndex(3))
+        
+        # Connect camera widget to logs panel
+        self.logs_panel.set_camera_widget(self.camera_dashboard.camera)
         
         # Set default panel
         self.stacked_widget.setCurrentIndex(0)
         
         # Set stylesheet
         self.setup_stylesheet()
+        
+    def show_logs_panel(self):
+        """Show logs panel and refresh logs"""
+        self.stacked_widget.setCurrentIndex(1)
+        self.logs_panel.refresh_logs()
         
     def setup_stylesheet(self):
         """Set application stylesheet"""
