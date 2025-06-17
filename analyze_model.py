@@ -93,7 +93,7 @@ if __name__ == "__main__":
         model_path = sys.argv[2]
     else:
         model_files = []
-        search_paths = ["*.pth", "models/*.pth", "saved_models/*.pth"]
+        search_paths = ["*.pth", "models/*.pth", "saved_models/*.pth","Trained_Models/*.pth"]
         for path in search_paths:
             model_files.extend(glob.glob(path))
         if model_files:
