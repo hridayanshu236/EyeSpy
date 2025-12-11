@@ -23,14 +23,14 @@ def export_students_to_csv(mapper, parent):
             writer.writerow(["Name", "Department", "Roll_number", "X", "Y"])
 
             # Write mapped students first (with coordinates)
-            # Use mapper.mapped_students and mapper.mapped_student_objects
+            
             for roll, (x, y) in mapper.mapped_students.items():
                 stu = mapper.mapped_student_objects.get(roll)
                 if not stu:
                     continue
                 writer.writerow([stu.name, stu.department, stu.roll, x, y])
 
-            # Then write unmapped students (X/Y empty)
+            # unmapped students (X/Y empty)
             for stu in mapper.unmapped_students:
                 writer.writerow([stu.name, stu.department, stu.roll, "", ""])
 
