@@ -43,7 +43,6 @@ class CoordinateMapper:
     def nearest_n_students(self, x, y, n=2, max_distance=None):
         """
         Return up to n nearest mapped students to (x,y).
-        Returns a list of tuples: [(roll, distance), ...] sorted by distance ascending.
         If max_distance is provided, only students within that distance are returned.
         """
         if not self.mapped_students:
@@ -52,11 +51,13 @@ class CoordinateMapper:
         dists = []
         for roll, (cx, cy) in self.mapped_students.items():
             dist = math.hypot(cx - x, cy - y)
-            dists.append((roll, dist))
+            if max_distance is None or dist <= max_distance:
+                dists.append((roll, dist))
 
+        if not dists:
+            return []
         dists.sort(key=lambda t: t[1])
-        if max_distance is not None:
-            dists = [t for t in dists if t[1] <= max_distance]
+
         return dists[:n]
 
     def get_student_by_roll(self, roll):

@@ -12,7 +12,7 @@ import threading
 import queue
 import heapq
 import shutil
-
+import math
 from Mapper import CoordinateMapper
 from canvas_manager import CanvasManager
 from list_manager import ListManager
@@ -39,9 +39,12 @@ class ImageTaggerUI:
         self.mapper = CoordinateMapper()
 
         self.root = tk.Tk()
-        self.root.title("Image Student Mapper - Cheating Detection (Play & Top-N)")
+        self.root.title("Cheating Detection")
         self.root.geometry("1400x900")
         self.root.minsize(1100, 650)
+        self.max_entries_per_person = 50   # number of saved frames per student (change as needed)
+        self.save_gap_seconds = 2        # minimum seconds between saved frames for the same student
+        self.person_entries = {} 
 
         # current image/frame (image coords)
         self.current_frame_bgr = None   # numpy BGR of currently sampled/frame
@@ -370,9 +373,18 @@ class ImageTaggerUI:
         # flag nearest students and save only bounding boxes image (no markers)
         flagged = []
         for det in dets:
-            cx = int((det["x1"]+det["x2"])/2)
-            cy = int((det["y1"]+det["y2"])/2)
-            nearest = self.mapper.nearest_n_students(cx, cy, n=2)
+            # bounding box size
+            w = det["x2"] - det["x1"]
+            h = det["y2"] - det["y1"]
+
+            bbox_diag = math.hypot(w, h)
+
+            # Distance threshold = 1.2 × diagonal of bbox
+            max_dist = bbox_diag * 1.2
+            cx = int((det["x1"] + det["x2"]) / 2)
+            cy = int((det["y1"] + det["y2"]) / 2)
+            nearest = self.mapper.nearest_n_students(cx, cy, n=2, max_distance=max_dist)
+
             for roll, dist in nearest:
                 stu = self.mapper.mapped_student_objects.get(roll)
                 if stu:
@@ -524,42 +536,155 @@ class ImageTaggerUI:
 
         self.status_bar.config(text="Playback worker completed")
         # mark thread finished
+        
+    def _save_detection_for_roll(self, frame_bgr, det, roll, uid):
+        """
+        Save a copy of the detection frame containing only bbox+label into the student's folder.
+        Returns the saved pathlib.Path or None on failure.
+        """
+        try:
+            stu = self.mapper.mapped_student_objects.get(roll)
+            if not stu:
+                return None
+
+            # Create per-student folder: NAME_ROLL (safe filename)
+            safe_name = f"{stu.name.replace(' ', '_')}_{stu.roll}"
+            person_dir = FLAGGED_DIR / safe_name
+            person_dir.mkdir(parents=True, exist_ok=True)
+
+            # prepare filename
+            ts = int(time.time())
+            fname = person_dir / f"top_{uid}_{safe_name}_{ts}.jpg"
+
+            # create image with only bbox (single bbox here)
+            img_copy = frame_bgr.copy()
+            x1 = int(det.get("x1", 0))
+            y1 = int(det.get("y1", 0))
+            x2 = int(det.get("x2", img_copy.shape[1] - 1))
+            y2 = int(det.get("y2", img_copy.shape[0] - 1))
+
+            # clamp coordinates to image bounds
+            h, w = img_copy.shape[:2]
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w - 1, x2), min(h - 1, y2)
+
+            # draw bbox and label
+            cv2.rectangle(img_copy, (x1, y1), (x2, y2), (0, 0, 255), 2)
+            label = f"Cheating {det.get('conf', 0.0) * 100:.1f}%"
+            cv2.putText(img_copy, label, (x1, max(12, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
+            # Write directly and check success
+            success = cv2.imwrite(str(fname), img_copy)
+            if not success:
+                print(f"[ERROR] cv2.imwrite failed for {fname}")
+                return None
+
+            return fname
+        except Exception as ex:
+            print(f"[ERROR] _save_detection_for_roll exception: {ex}")
+            return None
+
+    def _remove_saved_uid(self, uid):
+        """
+        Remove files recorded for uid and remove corresponding entries from person_entries.
+        """
+        try:
+            info = self.saved_files.get(uid)
+            if not info:
+                return
+            paths = info.get("paths", [])
+            rolls = info.get("rolls", [])
+            # delete files
+            for p in paths:
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except Exception:
+                    pass
+            # remove entries from person_entries lists matching this uid
+            for roll in rolls:
+                entries = self.person_entries.get(roll, [])
+                new_list = [e for e in entries if e.get("uid") != uid]
+                if new_list:
+                    self.person_entries[roll] = new_list
+                else:
+                    # remove key if empty
+                    self.person_entries.pop(roll, None)
+            # remove from saved_files mapping
+            self.saved_files.pop(uid, None)
+        except Exception:
+            pass
 
     def _consider_top_candidate(self, det, frame_bgr, src_name, frame_idx, nearest):
-        """
-        Maintain a min-heap of top-N detections by conf.
-        If det qualifies, save image with boxes and write log and maintain saved files.
-        """
         conf = float(det.get("conf", 0.0))
-        # if heap not full, push
+        now_ts = time.time()
+
+        # Determine which rolls are eligible (respecting max_entries_per_person & time gap)
+        eligible_rolls = []
+        for roll, dist in nearest:
+            entries = self.person_entries.get(roll, [])
+
+            # skip if too soon
+            if entries and (now_ts - entries[-1]["timestamp"] < self.save_gap_seconds):
+                continue
+
+            # skip if reached max
+            if len(entries) >= self.max_entries_per_person:
+                continue
+
+            eligible_rolls.append(roll)
+
+        # NEW: if nearest students exist but none eligible → LOG WHY
+        if nearest and not eligible_rolls:
+            print(f"[INFO] Detection for rolls {nearest} skipped due to save_gap or max_entries")
+            return
+
+        # If heap not full, push new candidate (store conf and uid)
         if len(self.top_heap) < TOP_N:
             uid = self._new_uid()
             heapq.heappush(self.top_heap, (conf, uid))
-            # save file and log
-            fname = FLAGGED_DIR / f"top_{uid}_{int(time.time())}.jpg"
-            self._save_detection_frame(frame_bgr, [det], fname)
-            self.saved_files[uid] = fname
-            self._log_detection_entries(det, frame_bgr, src_name, frame_idx, nearest, str(fname))
+            # Save per-student files and record
+            saved_paths = []
+            for roll in eligible_rolls:
+                path = self._save_detection_for_roll(frame_bgr, det, roll, uid)
+                if path:
+                    saved_paths.append(path)
+                    # record in per-person list
+                    self.person_entries.setdefault(roll, []).append({
+                        "uid": uid,
+                        "timestamp": now_ts,
+                        "filepath": str(path),
+                        "conf": conf
+                    })
+            self.saved_files[uid] = {"paths": saved_paths, "rolls": eligible_rolls}
+            # log entries
+            self._log_detection_entries(det, frame_bgr, src_name, frame_idx, eligible_rolls, saved_paths)
             self._update_topn_label()
             return
-        # heap full: compare with smallest
+
+        # Heap full: check if this candidate beats the smallest
         smallest_conf, smallest_uid = self.top_heap[0]
         if conf > smallest_conf:
-            # pop smallest, delete its file
+            # pop smallest
             _, popped_uid = heapq.heappop(self.top_heap)
-            if popped_uid in self.saved_files:
-                try:
-                    os.remove(self.saved_files[popped_uid])
-                except Exception:
-                    pass
-                del self.saved_files[popped_uid]
-            # push new
+            # delete saved files for popped_uid and remove entries from person_entries
+            self._remove_saved_uid(popped_uid)
+            # push new candidate
             uid = self._new_uid()
             heapq.heappush(self.top_heap, (conf, uid))
-            fname = FLAGGED_DIR / f"top_{uid}_{int(time.time())}.jpg"
-            self._save_detection_frame(frame_bgr, [det], fname)
-            self.saved_files[uid] = fname
-            self._log_detection_entries(det, frame_bgr, src_name, frame_idx, nearest, str(fname))
+            saved_paths = []
+            for roll in eligible_rolls:
+                path = self._save_detection_for_roll(frame_bgr, det, roll, uid)
+                if path:
+                    saved_paths.append(path)
+                    self.person_entries.setdefault(roll, []).append({
+                        "uid": uid,
+                        "timestamp": now_ts,
+                        "filepath": str(path),
+                        "conf": conf
+                    })
+            self.saved_files[uid] = {"paths": saved_paths, "rolls": eligible_rolls}
+            self._log_detection_entries(det, frame_bgr, src_name, frame_idx, eligible_rolls, saved_paths)
             self._update_topn_label()
 
     def _new_uid(self):
@@ -577,16 +702,22 @@ class ImageTaggerUI:
             cv2.putText(img_copy, f"Cheating {det.get('conf',0.0)*100:.1f}%", (x1, y1-6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
         cv2.imwrite(str(out_path), img_copy)
 
-    def _log_detection_entries(self, det, frame_bgr, src_name, frame_idx, nearest, frame_file_path):
+    def _log_detection_entries(self, det, frame_bgr, src_name, frame_idx, rolls, frame_file_paths):
+        """
+        Log entries to LOG_CSV for each student (roll) and the corresponding saved frame path.
+        rolls: list of roll strings
+        frame_file_paths: list of saved file paths in same order as rolls
+        """
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
         with open(LOG_CSV, "a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            for roll, dist in nearest:
+            for i, roll in enumerate(rolls):
                 stu = self.mapper.mapped_student_objects.get(roll)
-                if stu:
-                    writer.writerow([ts, frame_file_path, f"{src_name}@{frame_idx}", stu.name, stu.roll, det.get("conf",0.0), int((det["x1"]+det["x2"])/2), int((det["y1"]+det["y2"])/2)])
+                if not stu:
+                    continue
+                frame_path = frame_file_paths[i] if i < len(frame_file_paths) else ""
+                writer.writerow([ts, str(frame_path), f"{src_name}@{frame_idx}", stu.name, stu.roll, det.get("conf",0.0), int((det["x1"]+det["x2"])/2), int((det["y1"]+det["y2"])/2)])
 
-    # ----- Poll frame/result queues and update display (main thread) -----
     def _poll_queues(self):
         """
         Poll the frame_queue to display the most recent frame; overlay detection boxes and flags.
