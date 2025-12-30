@@ -34,6 +34,7 @@ class CanvasManager:
         # callbacks
         self._left_click_cb = None
         self._right_click_cb = None
+        self._resize_cb = None
         self.canvas.bind("<Button-1>", self._on_left_click)
         self.canvas.bind("<Button-3>", self._on_right_click)
         self.canvas.bind("<Motion>", self._on_motion)
@@ -47,7 +48,9 @@ class CanvasManager:
 
     def _create_canvas(self):
         self.canvas = tk.Canvas(self.parent_frame, bg="gray", cursor="crosshair")
-        self.canvas.pack(expand=True, padx=5, pady=5)
+        # Canvas will be managed by parent using grid
+        # Bind resize event to re-center image when canvas size changes
+        self.canvas.bind("<Configure>", self._on_canvas_resize)
 
     def _set_tk_image(self, pil):
         self.tk_image = ImageTk.PhotoImage(pil)
@@ -62,50 +65,69 @@ class CanvasManager:
         if fit_within:
             self.fit_within = fit_within
         self.pil_image = pil_image.copy()
-        orig_w, orig_h = self.pil_image.width, self.pil_image.height
-        max_w, max_h = self.fit_within
+        self._update_display_image()
 
-        # compute scale preserving aspect ratio (only downscale)
-        scale_x = min(1.0, max_w / orig_w) if orig_w else 1.0
-        scale_y = min(1.0, max_h / orig_h) if orig_h else 1.0
+        # clear overlays so they re-draw correctly for new scale
+        self.clear_detections()
+        self.clear_markers()
+
+    def _update_display_image(self):
+        """Update the displayed image with proper scaling and centering"""
+        orig_w, orig_h = self.pil_image.width, self.pil_image.height
+        
+        # Get current canvas size
+        canvas_w = self.canvas.winfo_width()
+        canvas_h = self.canvas.winfo_height()
+        
+        # Use actual canvas size if available, otherwise use fit_within
+        if canvas_w > 1 and canvas_h > 1:
+            max_w, max_h = canvas_w - 10, canvas_h - 10  # Small padding
+        else:
+            max_w, max_h = self.fit_within
+
+        # compute scale preserving aspect ratio
+        scale_x = max_w / orig_w if orig_w else 1.0
+        scale_y = max_h / orig_h if orig_h else 1.0
         scale = min(scale_x, scale_y) if (scale_x and scale_y) else 1.0
         if scale <= 0:
             scale = 1.0
 
-        # If image needs scaling down, do it; otherwise keep original
-        if scale != 1.0:
-            new_w = int(orig_w * scale)
-            new_h = int(orig_h * scale)
-            display_img = self.pil_image.resize((new_w, new_h), Image.Resampling.LANCZOS)
-            self.display_w, self.display_h = new_w, new_h
+        # Scale the image
+        new_w = int(orig_w * scale)
+        new_h = int(orig_h * scale)
+        display_img = self.pil_image.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        self.display_w, self.display_h = new_w, new_h
+
+        # Calculate center offsets
+        if canvas_w > 1 and canvas_h > 1:
+            self.offset_x = (canvas_w - self.display_w) // 2
+            self.offset_y = (canvas_h - self.display_h) // 2
         else:
-            display_img = self.pil_image.copy()
-            self.display_w, self.display_h = orig_w, orig_h
+            self.offset_x = 0
+            self.offset_y = 0
 
-        
-        try:
-            self.canvas.config(width=self.display_w, height=self.display_h)
-        except Exception:
-            pass
-
-        
+        # Update tkinter image
         self._set_tk_image(display_img)
         if self.image_id is None:
-            self.image_id = self.canvas.create_image(0, 0, anchor=tk.NW, image=self.tk_image)
+            self.image_id = self.canvas.create_image(
+                self.offset_x, self.offset_y, anchor=tk.NW, image=self.tk_image
+            )
         else:
+            self.canvas.coords(self.image_id, self.offset_x, self.offset_y)
             self.canvas.itemconfig(self.image_id, image=self.tk_image)
 
         # store transform (sx, sy)
         sx = self.display_w / orig_w if orig_w else 1.0
         sy = self.display_h / orig_h if orig_h else 1.0
         self.scale = (sx, sy)
-        # offsets (top-left anchor used here)
-        self.offset_x = 0
-        self.offset_y = 0
 
-        # clear overlays so they re-draw correctly for new scale
-        self.clear_detections()
-        self.clear_markers()
+    def _on_canvas_resize(self, event):
+        """Handle canvas resize to re-center and re-scale the image"""
+        if hasattr(self, 'pil_image') and self.pil_image:
+            self._update_display_image()
+            # Call resize callback to redraw overlays
+            if self._resize_cb:
+                self._resize_cb()
 
     def display_to_image(self, dx, dy):
         """
@@ -144,6 +166,10 @@ class CanvasManager:
 
     def bind_right_click(self, callback):
         self._right_click_cb = callback
+    
+    def bind_resize(self, callback):
+        """Register callback to be called when canvas is resized"""
+        self._resize_cb = callback
 
     # Drawing helpers (coords accepted in image coordinate space)
     def draw_marker(self, ix, iy, label, tag=None):
