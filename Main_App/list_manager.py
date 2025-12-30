@@ -4,20 +4,28 @@ class ListManager:
     """Encapsulates the two listboxes and helper functions for updating/getting selections."""
     def __init__(self, parent_frame):
         self.frame = parent_frame
-
+        self.detection_mode = False  # Track if in detection mode
+        
+        # Container for top section (will switch between unmapped and flagged)
+        self.top_container = tk.Frame(self.frame, bg="white")
+        self.top_container.pack(fill=tk.BOTH, expand=True)
+        
         # Unmapped section with label
-        tk.Label(self.frame, text="Unmapped Students", font=("Segoe UI", 11, "bold"), bg="lightblue", pady=5).pack(fill=tk.X)
-        self.unmapped_scroll = tk.Scrollbar(self.frame)
+        self.unmapped_label = tk.Label(self.top_container, text="Unmapped Students", font=("Segoe UI", 11, "bold"), bg="lightblue", pady=5)
+        self.unmapped_label.pack(fill=tk.X)
+        self.unmapped_scroll = tk.Scrollbar(self.top_container)
         self.unmapped_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.unmapped_listbox = tk.Listbox(self.frame, width=40, height=10, yscrollcommand=self.unmapped_scroll.set, font=("Courier", 10))
+        self.unmapped_listbox = tk.Listbox(self.top_container, width=40, height=10, yscrollcommand=self.unmapped_scroll.set, font=("Courier", 10))
         self.unmapped_listbox.pack(fill=tk.BOTH, expand=True, padx=(0,6))
         self.unmapped_scroll.config(command=self.unmapped_listbox.yview)
 
         # Spacer
-        tk.Frame(self.frame, height=6).pack(fill=tk.X)
+        self.spacer = tk.Frame(self.frame, height=6)
+        self.spacer.pack(fill=tk.X)
 
         # Mapped section with label
-        tk.Label(self.frame, text="Mapped Students", font=("Segoe UI", 11, "bold"), bg="lightgreen", pady=5).pack(fill=tk.X, pady=(6,0))
+        self.mapped_label = tk.Label(self.frame, text="Mapped Students", font=("Segoe UI", 11, "bold"), bg="lightgreen", pady=5)
+        self.mapped_label.pack(fill=tk.X, pady=(6,0))
         self.mapped_scroll = tk.Scrollbar(self.frame)
         self.mapped_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.mapped_listbox = tk.Listbox(self.frame, width=40, height=10, yscrollcommand=self.mapped_scroll.set, font=("Courier", 10))
@@ -95,3 +103,56 @@ class ListManager:
     def get_unmapped_listbox(self):
         """Return the unmapped listbox widget (for binding events)."""
         return self.unmapped_listbox
+    
+    # Detection mode methods
+    def switch_to_detection_mode(self):
+        """Switch to detection mode - show Flagged Students instead of Unmapped"""
+        if self.detection_mode:
+            return
+        
+        self.detection_mode = True
+        
+        # Update label
+        self.unmapped_label.config(text="🚨 Flagged Students", bg="#FFD700")
+        
+        # Clear and prepare for flagged students display
+        self.unmapped_listbox.delete(0, tk.END)
+    
+    def switch_to_normal_mode(self):
+        """Switch back to normal mode - show Unmapped Students"""
+        if not self.detection_mode:
+            return
+        
+        self.detection_mode = False
+        
+        # Update label
+        self.unmapped_label.config(text="Unmapped Students", bg="lightblue")
+        
+        # Clear flagged students display
+        self.unmapped_listbox.delete(0, tk.END)
+    
+    def update_flagged_students(self, flagged_data):
+        """
+        Update flagged students display with frame counts
+        
+        Args:
+            flagged_data: Dictionary {roll: {'name': str, 'count': int}}
+        """
+        if not self.detection_mode:
+            return
+        
+        self.unmapped_listbox.delete(0, tk.END)
+        
+        # Sort by count (descending) for visibility
+        sorted_students = sorted(
+            flagged_data.items(), 
+            key=lambda x: x[1]['count'], 
+            reverse=True
+        )
+        
+        for roll, data in sorted_students:
+            name = data['name']
+            count = data['count']
+            # Display format: "Name | Roll | Frames: X"
+            display_text = f"{name[:18]:18} | {roll:12} | 🚩 {count}"
+            self.unmapped_listbox.insert(tk.END, display_text)
